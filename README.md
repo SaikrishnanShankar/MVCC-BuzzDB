@@ -1,17 +1,12 @@
 # BuzzDB MVCC Implementation
-
 ![Database Logo](https://img.icons8.com/color/96/000000/database.png)
-
 **Team Members**: Aruneswari Sankar, Salkrishnan Sankar  
 
 ## 📌 Project Overview
-
 We've implemented **Multi-Version Concurrency Control (MVCC)** in BuzzDB
 
 ## 🛠 Technical Implementation
-
 ### Core Components
-
 1. **Versioned Storage Engine** (`buffer_manager.cc/h`)
    - Each tuple now has a chain of versions
    - New versions are appended instead of in-place updates
@@ -27,14 +22,7 @@ We've implemented **Multi-Version Concurrency Control (MVCC)** in BuzzDB
    - Read validation: `txn_timestamp > version_timestamp`
    - Write validation: No overlapping reads from newer transactions
 
-
 ### How to Test
-
 1. **Clone repository**
-
 2. **Build with CMake**
-   mkdir build && cd build
-   cmake .. && make
-
 3. **Run tests**
-   ./test/buzzdb_tests or ctest
