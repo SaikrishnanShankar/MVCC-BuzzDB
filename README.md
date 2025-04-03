@@ -28,16 +28,13 @@ We've implemented **Multi-Version Concurrency Control (MVCC)** in BuzzDB
    - Write validation: No overlapping reads from newer transactions
 
 
-###How to Test
+### How to Test
 
-# Clone repository
+1. **Clone repository**
 
-# Build with CMake
-mkdir build && cd build
-cmake .. && make
+2. **Build with CMake**
+   mkdir build && cd build
+   cmake .. && make
 
-# Run tests
-./test/buzzdb_tests
-
-# Run benchmarks
-./benchmark/mvcc_benchmark
+3. **Run tests**
+   ./test/buzzdb_tests or ctest
