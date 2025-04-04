@@ -9,84 +9,97 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include <mutex>
 
 namespace buzzdb {
 
-struct TID {
-  /// Constructor
-  explicit TID(uint64_t raw_value);
-  /// Constructor
-  TID(uint64_t page, uint16_t slot);
+static constexpr uint64_t INVALID_TXN_ID = UINT64_MAX;
+static constexpr uint64_t VERSION_CHAIN_END = UINT64_MAX;
 
-  /// The TID value
-  /// The TID could, for instance, look like the following:
-  /// - 48 bit page id
-  /// - 16 bit slot id
-  uint64_t value;
+struct VersionMetadata {
+    uint64_t create_ts;
+    uint64_t delete_ts;
+    uint64_t data_length;
+    uint64_t prev_version_offset;
+};
+
+struct TID {
+    /// Constructor
+    explicit TID(uint64_t raw_value) : value(raw_value), timestamp(0) {}
+    
+    /// Constructor
+    TID(uint64_t page, uint16_t slot) : value((page << 16) | slot), timestamp(0) {}
+    
+    /// The TID value
+    uint64_t value;
+    
+    /// Timestamp for MVTO
+    uint64_t timestamp;
 };
 
 std::ostream &operator<<(std::ostream &os, TID const &t);
 
 struct SlottedPage {
-  struct Header {
-    // Constructor
-    explicit Header(char *_buffer_frame, uint32_t page_size);
+    struct Header {
+        /// overall page id
+        uint64_t page_id;
+        /// last modifying transaction for MVTO
+        uint64_t last_mod_txn;
+        /// free space in page
+        uint32_t free_space;
+        /// number of versions in page
+        uint32_t version_count;
+    };
 
-    /// overall page id
-    uint64_t overall_page_id;
-    /// We've added: last dirtied transaction timestamp for MVTO
-    uint64_t last_dirtied_timestamp;
-    /// location of the page in memory
-    char *buffer_frame;
-    /// Number of currently used slots
-    uint16_t slot_count;
-    /// To speed up the search for a free slot
-    uint16_t first_free_slot;
-    /// Lower end of the data
-    uint32_t data_start;
-    /// Space that would be available after compactification
-    uint32_t free_space;
-  };
+    struct Slot {
+        /// current version offset
+        uint64_t current_version;
+        /// oldest version offset
+        uint64_t oldest_version;
+    };
 
-  struct Slot {
-    /// Constructor
-    Slot() = default;
-    /// The slot value
-    /// c.f. chapter 3 page 13
-    uint64_t value;
-  };
-
-  /// Constructor.
-  /// @param[in] buffer_frame The location of the page
-  /// @param[in] page_size    The size of the page.
-  explicit SlottedPage(char *buffer_frame, uint32_t page_size);
-
-  /// Compact the page.
-  /// @param[in] page_size    The size of a buffer frame.
-  void compactify(uint32_t page_size);
-
-  /// The header.
-  /// Note that the slotted page itself should reside on the buffer frame!
-  /// DO NOT allocate heap objects for a slotted page but instead
-  /// reinterpret_cast BufferFrame.get_data()! This is also the reason why the
-  /// constructor and compactify require the actual page size as argument. (The
-  /// slotted page itself does not know how large it is)
-  Header header;
-
-  /// Slot array
-  // Slot* slots;
-
-  Slot getSlot(uint16_t slotId);
-
-  TID addSlot(uint32_t size);
-
-  void setSlot(uint16_t slotId, uint64_t value);
+    /// Constructor.
+    SlottedPage(char* buffer, uint32_t page_size);
+    
+    /// Read a visible version
+    uint64_t read_version(uint64_t txn_id, uint64_t slot_id, 
+                         char* buffer, uint32_t size) const;
+    
+    /// Create a new version
+    uint64_t create_version(uint64_t txn_id, uint64_t slot_id,
+                           const char* data, uint32_t size);
+    
+    /// Get visible version for a transaction
+    const VersionMetadata* get_visible_version(uint64_t slot_id, 
+                                             uint64_t txn_id) const;
+    
+    /// Garbage collection
+    void collect_garbage(uint64_t oldest_active_ts);
+    
+    /// Compact the page
+    void compactify();
+    
+    /// The header
+    Header* header_;
+    
+    /// Slot array
+    Slot* slots_;
+    
+    /// Data area (after slots)
+    char* data_area_;
+    
+    /// Page size
+    uint32_t page_size_;
+    
+    /// Mutex for thread safety
+    mutable std::mutex page_mutex_;
+    
+private:
+    /// Get location of version data
+    char* get_version_location(uint64_t offset) const;
+    
+    /// Allocate space for a new version
+    uint64_t allocate_version_space(uint32_t size);
 };
-
-std::ostream &operator<<(std::ostream &os, SlottedPage::Slot const &m);
-
-std::ostream &operator<<(std::ostream &os, SlottedPage::Header const &h);
-
-std::ostream &operator<<(std::ostream &os, SlottedPage const &p);
 
 }  // namespace buzzdb

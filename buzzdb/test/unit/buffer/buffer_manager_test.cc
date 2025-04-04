@@ -102,7 +102,7 @@ TEST(MVCCTest, WriteConflictDetection) {
     helper.heap_segment.write(tid, reinterpret_cast<std::byte*>(&new_val1),
                             sizeof(uint64_t), txn1);
     
-    // Txn2 writes - should abort due to conflict
+    // Txn2 tries to write - should fail
     uint64_t new_val2 = 52;
     EXPECT_THROW(
         helper.heap_segment.write(tid, reinterpret_cast<std::byte*>(&new_val2),
@@ -116,7 +116,7 @@ TEST(MVCCTest, WriteConflictDetection) {
 /* CONCURRENCY TESTS */
 TEST(ConcurrencyTest, ConcurrentReaders) {
     MVCCTestHelper helper;
-    TID tid = insert_version(helper, 0, 123); // Initial version
+    TID tid = insert_version(helper, 0, 123);
     
     auto reader = [&](uint64_t txn_id) {
         std::vector<char> buf(sizeof(uint64_t));
@@ -130,7 +130,7 @@ TEST(ConcurrencyTest, ConcurrentReaders) {
     std::vector<std::thread> threads;
     for (int i = 0; i < 10; i++) {
         threads.emplace_back([&, i]() {
-            uint64_t txn_id = helper.txn_manager.start_txn(true); // Read-only
+            uint64_t txn_id = helper.txn_manager.start_txn(true);
             reader(txn_id);
             helper.txn_manager.commit_txn(txn_id);
         });
@@ -139,25 +139,18 @@ TEST(ConcurrencyTest, ConcurrentReaders) {
     for (auto& t : threads) t.join();
 }
 
-/* NEW MVCC FUNCTIONALITY TESTS */
 TEST(MVCCTest, VersionChainTraversal) {
     MVCCTestHelper helper;
-    
-    // Create version chain: v1 -> v2 -> v3
     uint64_t txn1 = helper.txn_manager.start_txn();
     TID tid = insert_version(helper, txn1, 1);
     helper.txn_manager.commit_txn(txn1);
-    
     uint64_t txn2 = helper.txn_manager.start_txn();
     helper.heap_segment.write(tid, reinterpret_cast<std::byte*>(&(uint64_t){2}),
                          sizeof(uint64_t), txn2);
-    helper.txn_manager.commit_txn(txn2);
-    
+    helper.txn_manager.commit_txn(txn2);   
     uint64_t txn3 = helper.txn_manager.start_txn();
     helper.heap_segment.write(tid, reinterpret_cast<std::byte*>(&(uint64_t){3}),
                          sizeof(uint64_t), txn3);
-    
-    // Read from txn2's perspective should see v2
     std::vector<char> buf(sizeof(uint64_t));
     helper.heap_segment.read(tid, reinterpret_cast<std::byte*>(buf.data()),
                          buf.size(), txn2);
@@ -179,7 +172,6 @@ TEST(MVCCTest, AbortedVersionInvisible) {
     uint64_t txn2 = helper.txn_manager.start_txn();
     std::vector<char> buf(sizeof(uint64_t));
     
-    // Should not find the aborted version
     EXPECT_THROW(
         helper.heap_segment.read(tid, reinterpret_cast<std::byte*>(buf.data()),
                                 buf.size(), txn2),

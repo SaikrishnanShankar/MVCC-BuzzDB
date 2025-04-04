@@ -1,12 +1,8 @@
-#include <cassert>
-#include <iostream>
-#include <string>
-
-#include "buffer/buffer_manager.h"
+#include "buffer_manager.h"
 #include "common/macros.h"
 #include "storage/file.h"
 #include <chrono>
-#include <ctime> 
+#include <ctime>
 
 uint64_t wake_timeout_ = 100;
 uint64_t timeout_ = 2;
@@ -15,13 +11,20 @@ namespace buzzdb {
 
 char* BufferFrame::get_data() { return data.data(); }
 
-// We've added: Get visible version for MVTO protocol
 TID BufferFrame::get_visible_version(uint64_t txn_timestamp) {
-    // For now, just return the first version (will implement version chain traversal later)
-    if (!version_chain_.empty()) {
-        return version_chain_.back(); // Newest-to-oldest ordering
+    std::lock_guard<std::mutex> lock(version_chain_mutex_);
+    for (const auto& version : version_chain_) {
+        // timestamp <= txn_timestamp  => it should be visible
+        if (version.timestamp <= txn_timestamp) {
+            return version;
+        }
     }
     return TID(INVALID_PAGE_ID, 0);
+}
+
+void BufferFrame::add_version(TID new_version) {
+    std::lock_guard<std::mutex> lock(version_chain_mutex_);
+    version_chain_.insert(version_chain_.begin(), new_version);
 }
 
 BufferFrame::BufferFrame()
@@ -36,7 +39,7 @@ BufferFrame::BufferFrame(const BufferFrame& other)
       data(other.data),
       dirty(other.dirty),
       exclusive(other.exclusive),
-      version_chain_(other.version_chain_) {}  // We've added: Copy version chain
+      version_chain_(other.version_chain_) {}
 
 BufferFrame& BufferFrame::operator=(BufferFrame other) {
     std::swap(this->page_id, other.page_id);
@@ -44,14 +47,13 @@ BufferFrame& BufferFrame::operator=(BufferFrame other) {
     std::swap(this->data, other.data);
     std::swap(this->dirty, other.dirty);
     std::swap(this->exclusive, other.exclusive);
-    std::swap(this->version_chain_, other.version_chain_);  // We've added: Swap version chain
+    std::swap(this->version_chain_, other.version_chain_);
     return *this;
 }
 
 BufferManager::BufferManager(size_t page_size, size_t page_count) {
     capacity_ = page_count;
     page_size_ = page_size;
-
     pool_.resize(capacity_);
     for (size_t frame_id = 0; frame_id < capacity_; frame_id++) {
         pool_[frame_id].reset(new BufferFrame());
@@ -65,31 +67,62 @@ BufferManager::~BufferManager() {
 }
 
 BufferFrame& BufferManager::fix_page(uint64_t txn_id, uint64_t page_id, bool exclusive) {
-    // Simplified implementation - will need to add proper locking for MVTO
     for (auto& frame : pool_) {
         if (frame->page_id == page_id) {
+            if (exclusive && !frame->exclusive) {
+                frame->exclusive = true;
+                frame->exclusive_thread_id = std::this_thread::get_id();
+            }
             return *frame;
         }
     }
-
-    // If not found, use first frame (simple replacement)
-    auto& frame = pool_[0];
-    frame->page_id = page_id;
-    frame->dirty = false;
-    read_frame(0); // Read from disk
-    return *frame;
+    for (auto& frame : pool_) {
+        if (frame->page_id == INVALID_PAGE_ID) {
+            frame->page_id = page_id;
+            frame->dirty = false;
+            frame->exclusive = exclusive;
+            if (exclusive) {
+                frame->exclusive_thread_id = std::this_thread::get_id();
+            }
+            read_frame(frame->frame_id);
+            return *frame;
+        }
+    }
+    throw buffer_full_error();
 }
 
 void BufferManager::unfix_page(uint64_t txn_id, BufferFrame& page, bool is_dirty) {
     if (is_dirty) {
         page.dirty = true;
     }
+    if (page.exclusive) {
+        page.exclusive = false;
+    }
 }
 
 void BufferManager::flush_all_pages() {
     for (size_t frame_id = 0; frame_id < capacity_; frame_id++) {
-        if (pool_[frame_id]->dirty == true) {
+        if (pool_[frame_id]->dirty) {
             write_frame(frame_id);
+        }
+    }
+}
+
+void BufferManager::flush_page(uint64_t page_id) {
+    for (size_t frame_id = 0; frame_id < capacity_; frame_id++) {
+        if (pool_[frame_id]->page_id == page_id && pool_[frame_id]->dirty) {
+            write_frame(frame_id);
+            return;
+        }
+    }
+}
+
+void BufferManager::discard_page(uint64_t page_id) {
+    for (size_t frame_id = 0; frame_id < capacity_; frame_id++) {
+        if (pool_[frame_id]->page_id == page_id) {
+            pool_[frame_id].reset(new BufferFrame());
+            pool_[frame_id]->data.resize(page_size_);
+            return;
         }
     }
 }
@@ -103,18 +136,16 @@ void BufferManager::discard_all_pages() {
     }
 }
 
-void BufferManager::discard_pages(uint64_t txn_id) {
-    // For now, just discard all pages
-    discard_all_pages();
-}
-
 void BufferManager::flush_pages(uint64_t txn_id) {
-    // For now, just flush all pages
     flush_all_pages();
 }
 
+void BufferManager::discard_pages(uint64_t txn_id) {
+    discard_all_pages();
+}
+
 void BufferManager::transaction_complete(uint64_t txn_id) {
-    // No-op for now, will implement proper cleanup later
+    // We haven't implemented because version based recovery hasn't been implemented yet
 }
 
 void BufferManager::transaction_abort(uint64_t txn_id) {
@@ -139,5 +170,4 @@ void BufferManager::write_frame(uint64_t frame_id) {
     file_handle->write_block(pool_[frame_id]->data.data(), start, page_size_);
     pool_[frame_id]->dirty = false;
 }
-
 }  // namespace buzzdb

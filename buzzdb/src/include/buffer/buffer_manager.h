@@ -15,13 +15,13 @@
 #include <set>
 
 #include "common/macros.h"
-#include "storage/slotted_page.h"  // We've added for TID
-#include "./MVTO/mvto.h"  // We've added for MVTO protocol
+#include "storage/slotted_page.h"
+#include "mvto.h"
 
 namespace buzzdb {
 
 class BufferFrame {
- private:
+private:
     friend class BufferManager;
 
     uint64_t page_id;
@@ -32,15 +32,18 @@ class BufferFrame {
     bool exclusive;
     std::thread::id exclusive_thread_id;
 
-    // We've added: Version chain for MVCC
     std::vector<TID> version_chain_;
+    mutable std::mutex version_chain_mutex_;
 
- public:
+public:
     /// Returns a pointer to this page's data.
     char *get_data();
 
-    // We've added: Get visible version for MVTO
+    /// Get visible version for MVTO protocol
     TID get_visible_version(uint64_t txn_timestamp);
+
+    /// Add a new version to the version chain
+    void add_version(TID new_version);
 
     BufferFrame();
 
@@ -48,25 +51,25 @@ class BufferFrame {
 
     BufferFrame &operator=(BufferFrame other);
 
-    void mark_dirty() {dirty = true;}
+    void mark_dirty() { dirty = true; }
 };
 
 class buffer_full_error : public std::exception {
- public:
+public:
     const char *what() const noexcept override { return "buffer is full"; }
 };
 
 class transaction_abort_error : public std::exception {
- public:
+public:
     const char *what() const noexcept override { return "transaction aborted"; }
 };
 
 class BufferManager {
- public:
+public:
     /// Constructor.
     /// @param[in] page_size  Size in bytes that all pages will have.
     /// @param[in] page_count Maximum number of pages that should reside in
-    //                        memory at the same time.
+    ///                       memory at the same time.
     BufferManager(size_t page_size, size_t page_count);
 
     /// Destructor. Writes all dirty pages to disk.
@@ -74,7 +77,7 @@ class BufferManager {
 
     BufferFrame &fix_page(uint64_t txn_id, uint64_t page_id, bool exclusive);
 
-    void unfix_page(uint64_t txn_id, BufferFrame& page, bool is_dirty);
+    void unfix_page(uint64_t txn_id, BufferFrame &page, bool is_dirty);
 
     /// Returns the segment id for a given page id which is contained in the 16
     /// most significant bits of the page id.
@@ -102,7 +105,7 @@ class BufferManager {
             auto segment_id = BufferManager::get_segment_id(page_id);
             auto segment_page_id = BufferManager::get_segment_page_id(page_id);
             return "( " + std::to_string(segment_id) + " " +
-                         std::to_string(segment_page_id) + " )";
+                   std::to_string(segment_page_id) + " )";
         }
     }
 
@@ -117,13 +120,12 @@ class BufferManager {
     void transaction_complete(uint64_t txn_id);
     void transaction_abort(uint64_t txn_id);
 
- private:
+private:
     uint64_t capacity_;
     size_t page_size_;
     std::vector<std::unique_ptr<BufferFrame>> pool_;
-
     mutable std::mutex file_use_mutex_;
-    
+
     void read_frame(uint64_t frame_id);
     void write_frame(uint64_t frame_id);
 };

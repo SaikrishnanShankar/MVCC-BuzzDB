@@ -1,18 +1,16 @@
-#include <iostream>
-
-#include "heap/heap_file.h"
+#include "heap_file.h"
 #include "common/macros.h"
-#include "mvto.h"  // We've added for MVTO protocol
+#include "mvto.h"
 
 namespace buzzdb {
 
 HeapPage::Header::Header(char *_buffer_frame, uint32_t page_size) {
     buffer_frame = _buffer_frame;
-    last_dirtied_timestamp = INVALID_TXN_ID;  // We've added: Initialize timestamp
+    last_dirtied_timestamp = INVALID_TXN_ID;
     first_free_slot = 0;
     data_start = page_size;
     slot_count = 0;
-    free_space = page_size - sizeof(header);
+    free_space = page_size - sizeof(Header);
     slot_count = 0;
     overall_page_id = -1;
 }
@@ -40,7 +38,7 @@ std::ostream &operator<<(std::ostream &os, HeapPage::Header const &h) {
     os << "data_start       : " << h.data_start << "\n";
     os << "free_space       : " << h.free_space << "\n";
     os << "slot_count       : " << h.slot_count << "\n";
-    os << "last_dirtied_ts  : " << h.last_dirtied_timestamp << "\n";  // We've added
+    os << "last_dirtied_ts  : " << h.last_dirtied_timestamp << "\n";
 
     return os;
 }
@@ -135,7 +133,7 @@ TID HeapPage::addSlot(uint32_t size) {
 }
 
 HeapSegment::HeapSegment(uint16_t segment_id, LogManager &log_manager,
-        BufferManager& buffer_manager)
+                        BufferManager& buffer_manager)
     : segment_id_(segment_id),
       log_manager_(log_manager),
       buffer_manager_(buffer_manager),
@@ -144,55 +142,57 @@ HeapSegment::HeapSegment(uint16_t segment_id, LogManager &log_manager,
 
 TID HeapSegment::allocate(uint32_t record_size, uint64_t txn_id) {
     for (size_t segment_page_itr = 0;
-            segment_page_itr < page_count_;
-            segment_page_itr++) {
+         segment_page_itr < page_count_;
+         segment_page_itr++) {
 
         uint64_t page_id =
-                BufferManager::get_overall_page_id(segment_id_, segment_page_itr);
+            BufferManager::get_overall_page_id(segment_id_, segment_page_itr);
 
         BufferFrame &frame = buffer_manager_.fix_page(txn_id, page_id, true);
-        auto* page = reinterpret_cast<SlottedPage*>(frame.get_data());
+        auto* page = reinterpret_cast<HeapPage*>(frame.get_data());
 
         if(record_size > page->header.free_space){
+            buffer_manager_.unfix_page(txn_id, frame, false);
             continue;
         }
 
         TID tid = page->addSlot(record_size);
+        buffer_manager_.unfix_page(txn_id, frame, true);
         return tid;
     }
 
-    uint64_t page_id =
-          BufferManager::get_overall_page_id(segment_id_, page_count_);
-
+    uint64_t page_id = BufferManager::get_overall_page_id(segment_id_, page_count_);
     page_count_++;
 
     BufferFrame& frame = buffer_manager_.fix_page(txn_id, page_id, true);
     auto* page = new (frame.get_data())
-            SlottedPage(frame.get_data(), buffer_manager_.get_page_size());
+            HeapPage(frame.get_data(), buffer_manager_.get_page_size());
 
     page->header.overall_page_id = page_id;
     TID tid = page->addSlot(record_size);
+    buffer_manager_.unfix_page(txn_id, frame, true);
 
     return tid;
 }
 
 uint32_t HeapSegment::read(TID tid, std::byte* record, uint32_t capacity, uint64_t txn_id) const {
     uint64_t page_id = tid.value >> 16;
-    uint64_t overall_page_id =
-        BufferManager::get_overall_page_id(segment_id_, page_id);
+    uint64_t overall_page_id = BufferManager::get_overall_page_id(segment_id_, page_id);
     uint16_t slot_id = tid.value & ((1ull << 16) - 1);
 
     BufferFrame& frame = buffer_manager_.fix_page(txn_id, overall_page_id, false);
-    auto* page = reinterpret_cast<SlottedPage*>(frame.get_data());
-
-    // We've added: Get visible version for MVTO
-    TID visible_tid = frame.get_visible_version(transaction_table_[txn_id].timestamp_);
+    auto* page = reinterpret_cast<HeapPage*>(frame.get_data());
+    TID visible_tid = frame.get_visible_version(txn_id);
     if (visible_tid.value != tid.value) {
-        // Need to read from version chain (will implement fully later)
-        std::cout << "Reading from version chain not yet implemented" << std::endl;
+        // Reading from the version chain
+        auto* slotted_page = reinterpret_cast<SlottedPage*>(frame.get_data());
+        char* data = reinterpret_cast<char*>(record);
+        uint32_t bytes_read = slotted_page->read_version(txn_id, slot_id, data, capacity);
+        buffer_manager_.unfix_page(txn_id, frame, false);
+        return bytes_read;
     }
 
-    buzzdb::SlottedPage::Slot slot = page->getSlot(slot_id);
+    HeapPage::Slot slot = page->getSlot(slot_id);
     uint64_t value = slot.value;
     uint32_t length = value << 40 >> 40;
     uint32_t offset = value << 16 >> 40;
@@ -205,52 +205,39 @@ uint32_t HeapSegment::read(TID tid, std::byte* record, uint32_t capacity, uint64
         exit(0);
     }
 
+    buffer_manager_.unfix_page(txn_id, frame, false);
     return length;
 }
 
 uint32_t HeapSegment::write(TID tid, std::byte* record, uint32_t record_size, uint64_t txn_id) {
     uint64_t page_id = tid.value >> 16;
-    uint64_t overall_page_id =
-        BufferManager::get_overall_page_id(segment_id_, page_id);
+    uint64_t overall_page_id = BufferManager::get_overall_page_id(segment_id_, page_id);
     uint16_t slot_id = tid.value & ((1ull << 16) - 1);
-
     BufferFrame& frame = buffer_manager_.fix_page(txn_id, overall_page_id, true);
-    auto* page = reinterpret_cast<SlottedPage*>(frame.get_data());
-
-    // We've added: MVTO validation before write
+    auto* page = reinterpret_cast<HeapPage*>(frame.get_data());
     if (!MVTOProtocol::validate_write(transaction_table_[txn_id], page->header.last_dirtied_timestamp)) {
+        buffer_manager_.unfix_page(txn_id, frame, false);
         throw transaction_abort_error();
     }
-
-    // Update last dirtied timestamp
     page->header.last_dirtied_timestamp = transaction_table_[txn_id].timestamp_;
-
-    buzzdb::SlottedPage::Slot slot = page->getSlot(slot_id);
-    uint64_t value = slot.value;
-    uint32_t offset = value << 16 >> 40;
-    
-    memcpy(&frame.get_data()[offset], record, record_size);
+    auto* slotted_page = reinterpret_cast<SlottedPage*>(frame.get_data());
+    slotted_page->create_version(txn_id, slot_id, reinterpret_cast<char*>(record), record_size);
     frame.mark_dirty();
-    return 0;
+    buffer_manager_.unfix_page(txn_id, frame, true);
+    return record_size;
 }
 
 std::ostream &operator<<(std::ostream &os, HeapSegment const &s) {
     for (size_t segment_page_itr = 0;
-            segment_page_itr < s.page_count_;
-            segment_page_itr++) {
-
+         segment_page_itr < s.page_count_;
+         segment_page_itr++) {
         uint64_t page_id =
-                BufferManager::get_overall_page_id(s.segment_id_,
-                        segment_page_itr);
-
+            BufferManager::get_overall_page_id(s.segment_id_, segment_page_itr);
         BufferFrame &frame = s.buffer_manager_.fix_page(INVALID_TXN_ID, page_id, true);
-        auto* page = reinterpret_cast<SlottedPage*>(frame.get_data());
-
+        auto* page = reinterpret_cast<HeapPage*>(frame.get_data());
         os << *page;
-
         s.buffer_manager_.unfix_page(INVALID_TXN_ID, frame, false);
     }
-
     return os;
 }
 
